@@ -89,10 +89,20 @@ Once you are done setting up the project, you can now start working with the MET
 ## Setup in R
 
 1. Load the `data.table` (and the `dtplyr` and `dplyr` packages if you plan to work with those).
+```{r}
+library(ggplot2)
+library(leaflet)
+library(data.table)
+library(dtplyr) 
+library(dplyr)
+```
 
 2. Load the met data from https://github.com/JSC370/jsc370-2023/blob/main/labs/lab03/met_all.gz or  (Use https://raw.githubusercontent.com/JSC370/jsc370-2023/main/labs/lab03/met_all.gz to download programmatically), and also the station data. For the latter, you can use the code we used during lecture to pre-process the stations data:
+```{r}
+met <- data.table::fread("met_all.gz")
+```
 
-```{r stations-data, eval = FALSE}
+```{r stations-data}
 # Download the data
 stations <- fread("ftp://ftp.ncdc.noaa.gov/pub/data/noaa/isd-history.csv")
 stations[, USAF := as.integer(USAF)]
@@ -114,36 +124,123 @@ stations <- stations[n == 1,][, n := NULL]
 ```
 
 3. Merge the data as we did during the lecture.
-
+```{r}
+merged <- merge(x = met, y = stations, 
+                          all.x = TRUE, all.y = FALSE,
+                          by.x = "USAFID", by.y = "USAF")
+```
 ## Question 1: Representative station for the US
 
 Across all weather stations, what is the median station in terms of temperature, wind speed, and atmospheric pressure? Look for the three weather stations that best represent continental US using the `quantile()` function. Do these three coincide?
 
 ```{r}
+avg <- merged[, .(temp = mean(temp, na.rm = TRUE), 
+                       wind.sp = mean(wind.sp, na.rm = TRUE),
+                       atm.press = mean(atm.press, na.rm = TRUE)),
+                   by = .(USAFID)]
 
+met_med_lz <- avg |>
+  summarise(across(
+    2:4,
+    function(x) quantile(x, probs = .5, na.rm = TRUE)
+  ))
+
+# temperature
+temp_us_id <- avg |>
+  mutate(
+    d = abs(temp - met_med_lz |> pull(temp))
+    ) |>
+  arrange(d) |>
+  slice(1) |>
+  pull(USAFID)
+# wind speed
+wsp_us_id <- avg |>
+  mutate(
+    d = abs(wind.sp - met_med_lz |> pull(wind.sp))
+    ) |>
+  arrange(d) |>
+  slice(1) |>
+  pull(USAFID)
+# atm speed
+atm_us_id <- avg |>
+  mutate(
+    d = abs(atm.press - met_med_lz |> pull(atm.press))
+    ) |>
+  arrange(d) |>
+  slice(1) |>
+  pull(USAFID)
+cat(
+  "ID with median . . .",
+  "\n    temperature: ", temp_us_id, 
+  "\n    wind speed: ", wsp_us_id,
+  "\n    atm: ", atm_us_id
+)
 ```
-
-Knit the document, commit your changes, and save it on GitHub. Don't forget to add `README.md` to the tree, the first time you render it.
+```{r}
+merged |>
+  select(USAFID, lon, lat) |>
+  distinct() |>
+  filter(USAFID %in% c(temp_us_id, wsp_us_id, atm_us_id))
+```
+No these 3 stations do not coincide.
 
 ## Question 2: Representative station per state
 
 Just like the previous question, you are asked to identify what is the most representative, the median, station per state. This time, instead of looking at one variable at a time, look at the euclidean distance. If multiple stations show in the median, select the one located at the lowest latitude.
 
 ```{r}
+# Compute average of three variables per state per station
+avg_state <- merged[, .(temp = mean(temp, na.rm = TRUE), 
+                       wind.sp = mean(wind.sp, na.rm = TRUE),
+                       atm.press = mean(atm.press, na.rm = TRUE)),
+                   by = .(USAFID, STATE)]
+# Compute medians of three variables per state
+medians_state <- avg_state[, .(temp_med = quantile(temp, probs = .5, na.rm = TRUE),
+                           wind.sp_med = quantile(wind.sp, probs = .5, na.rm = TRUE),
+                           atm.press_med = quantile(atm.press, probs = 0.5, na.rm = TRUE)),
+                       by = STATE]
+# Merge to original table
+median_eucl <- merge(x=merged, y=medians_state, by="STATE")
 
+# Compute euclidean distance
+median_eucl[, euclidean := sqrt((temp - medians_state$temp_med)^2 + (wind.sp - medians_state$wind.sp_med)^2 + (atm.press - medians_state$atm.press_med)^2)]
+
+# Get representation: minimum latitude
+repre <- median_eucl[, .SD[which.min(lat)], by=STATE]
+repre <- repre[, list(USAFID, lat, lon, euclidean, STATE, temp_med, wind.sp_med, atm.press_med)]
+repre
 ```
-
-Knit the doc and save it on GitHub.
 
 ## Question 3: In the middle?
 
 For each state, identify what is the station that is closest to the mid-point of the state. Combining these with the stations you identified in the previous question, use `leaflet()` to visualize all ~100 points in the same figure, applying different colors for those identified in this question.
 
 ```{r}
+# Finding middle points
+middle <- merged[, .(lon_50 = quantile(lon, probs=.5, na.rm=TRUE),
+                     lat_50 = quantile(lat, probs=.5, na.rm=TRUE)),
+                 by = STATE]
 
+merged3 <- merge(x=merged, y=middle, by="STATE")
+
+# Getting Euclid distances
+merged3[, distance := sqrt((lon - lon_50)^2 + (lat - lat_50)^2)]
+midpoint_station <- merged3[, .SD[which.min(distance)], by = STATE]
 ```
 
-Knit the doc and save it on GitHub.
+```{r}
+# Create map
+leaflet() %>%
+  addProviderTiles('CartoDB.Positron') %>%
+  # add circles for stations at midpoint
+  addCircles(data = midpoint_station, lat = ~lat, lng = ~lon, popup = "State Midpoint",
+             opacity = 1, fillOpacity = 1, radius = 400, color = "yellow") %>%
+  addCircles(data = median_eucl,
+             lat =~ lat, lng =~lon, popup="Median Station",
+             opacity = 1, fillOpacity = 1, radius = 400, color = "green")
+```
+
+
 
 ## Question 4: Means of means
 
@@ -156,7 +253,11 @@ Start by computing the states' average temperature. Use that measurement to clas
 - High: temp >= 25
 
 ```{r}
-
+# create column of average temperature
+merged[, avg_temp := mean(temp, na.rm=TRUE), by=STATE]
+# classify temperature accordingly
+merged[, temp_criteria := fifelse(avg_temp < 20, "low-temp", 
+                          fifelse(avg_temp < 25, "mid-temp", "high-temp"))]
 ```
 
 Once you are done with that, you can compute the following:
@@ -170,10 +271,19 @@ Once you are done with that, you can compute the following:
 All by the levels described before.
 
 ```{r}
+# Compute summary table
+summary <- merged[, .(
+  entries = .N,
+  N_entries_na = sum(is.na(temp_criteria)),
+  N_stations = length(unique(USAFID)),
+  N_states = length(unique(STATE)),
+  ave_temp = mean(temp, na.rm = TRUE),
+  ave_wind.sp = mean(wind.sp, na.rm=TRUE),
+  ave_atm.press = mean(atm.press, na.rm = TRUE)
+), by = temp_criteria]
 
+summary
 ```
-
-Knit the document, commit your changes, and push them to GitHub. 
 
 
 ## Question 5: Advanced Regression
@@ -185,5 +295,33 @@ Let's practice running regression models with smooth functions on X. We need the
 - fit both a linear model and a spline model (use `gam()` with a cubic regression spline on wind speed). Summarize and plot the results from the models and interpret which model is the best fit and why.
 
 ```{r}
+library(mgcv)
 
+ggplot(medians_state, aes(x = wind.sp_med, y = temp_med)) + 
+  geom_point()+
+  geom_smooth(method = "lm") +
+  geom_smooth(method = "gam") +
+  theme_bw()
 ```
+
+```{r}
+# Fit linear model
+model <- lm(temp_med ~ wind.sp_med, data = medians_state)
+summary(model)
+```
+```{r}
+plot(model)
+```
+
+```{r}
+# Fit spline model
+spline <- gam(temp_med ~ s(wind.sp_med, bs="cr", k=40), data = medians_state)
+summary(spline)
+```
+```{r}
+plot(spline)
+```
+The coefficient for wind.sp_med in the linear model has a p value of 0.836, and the plots generated shows that the linear assumption is very possibly false, hence the linear model is not statistically significant. On the other hand, the spline model has a very small p value, and small standard error, hence the spline model is the better model.
+
+
+
